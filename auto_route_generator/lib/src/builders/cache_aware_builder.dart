@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:analyzer/dart/analysis/utilities.dart';
 import 'package:analyzer/dart/ast/ast.dart';
 import 'package:analyzer/dart/element/element.dart';
 import 'package:build/build.dart';
@@ -69,16 +70,13 @@ abstract class CacheAwareBuilder<T> extends Builder {
 
   @override
   Future<void> build(BuildStep buildStep) async {
-    final resolver = buildStep.resolver;
-    if (!await resolver.isLibrary(buildStep.inputId)) return;
-    var unit = await resolver.compilationUnitFor(
-      buildStep.inputId,
-      allowSyntaxErrors: allowSyntaxErrors,
-    );
+    final unit = await _parse(buildStep, buildStep.inputId);
+    if (unit == null || unit.directives.any((e) => e is PartOfDirective)) return;
     if (!(await hasAnyTopLevelAnnotations(buildStep.inputId, buildStep, unit))) {
       return;
     }
 
+    final resolver = buildStep.resolver;
     var cacheHash = 0;
     if (cacheEnabled) {
       cacheHash = calculateUpdatableHash(unit);
@@ -144,8 +142,8 @@ source formatter.''',
 
   /// Checks if the current compilation unit has any top level annotations
   Future<bool> hasAnyTopLevelAnnotations(AssetId input, BuildStep buildStep, [CompilationUnit? unit]) async {
-    if (!await buildStep.canRead(input)) return false;
-    final parsed = unit ?? await buildStep.resolver.compilationUnitFor(input);
+    final parsed = unit ?? await _parse(buildStep, input);
+    if (parsed == null) return false;
     final partIds = <AssetId>[];
     for (var directive in parsed.directives) {
       if (directive.metadata.any((e) => e.name.name == annotationName)) {
@@ -168,6 +166,23 @@ source formatter.''',
       }
     }
     return false;
+  }
+
+  /// Parses [input] without the resolver, or returns `null` if it can not be read.
+  ///
+  /// Only files with the annotation reach the resolver, as its first use in a build step is
+  /// expensive. A syntax error is still reported by the resolver unless [allowSyntaxErrors].
+  Future<CompilationUnit?> _parse(BuildStep buildStep, AssetId input) async {
+    if (!await buildStep.canRead(input)) return null;
+    final result = parseString(
+      content: await buildStep.readAsString(input),
+      path: input.path,
+      throwIfDiagnostics: false,
+    );
+    if (result.errors.isNotEmpty && !allowSyntaxErrors) {
+      return buildStep.resolver.compilationUnitFor(input);
+    }
+    return result.unit;
   }
 }
 
